@@ -1,0 +1,14 @@
+#!/bin/bash
+oPWD="$(pwd)"
+cd /tmp
+
+apt-get install -y liborc-0.4-dev 
+git clone https://github.com/t812206236/gr-nfc
+mkdir gr-nfc/build
+cd gr-nfc/build
+cmake ../
+make
+make install
+ldconfig
+
+cd "$oPWD"

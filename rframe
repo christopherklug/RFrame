@@ -1,0 +1,537 @@
+#!/bin/bash
+
+project_name="$2"
+rframe_dir="$(pwd)/.rframe"
+
+function info() {
+	i="${1:-$(</dev/stdin)}"
+	LOG_INFO='\033[1;33m'
+	if [[ $(echo -n "$i" | wc -m) -gt 0 ]]; then
+		echo -e "\033[2K${LOG_INFO}[[ $i ]]\e[0m "
+	fi
+}
+
+function info_inline() {
+	i="${1:-$(</dev/stdin)}"
+	LOG_INFO='\033[1;33m'
+	if [[ $(echo -n "$i" | wc -m) -gt 0 ]]; then
+		echo -en "\r\033[2K${LOG_INFO}[[ $i ]]\e[0m"
+	fi
+}
+
+function err() {
+	i="${1:-$(</dev/stdin)}"
+	LOG_ERR='\033[1m\033[31m'
+	if [[ $(echo -n "$i" | wc -m) -gt 0 ]]; then
+		echo -e "\r\033[2K${LOG_ERR}{{ $i }}\e[0m" >&2
+	fi
+}
+
+function suc() {
+	i="${1:-$(</dev/stdin)}"
+	LOG_SUC='\033[32m'
+	if [[ $(echo -n "$i" | wc -m) -gt 0 ]]; then
+		echo -e "\r\033[2K${LOG_SUC}[[ $i ]]\e[0m"
+	fi
+}
+
+function config() {
+
+	{ test -d "$rframe_dir" || test -L "$rframe_dir"; } || (/snap/bin/lxd init --auto && mkdir -p "$rframe_dir") >/dev/null
+
+	if [ "$(/snap/bin/lxc network list | grep -c "rframe-bridge")" -eq 0 ]; then
+		info "Setting up RFrame network ..."
+		/snap/bin/lxc network delete rframe-bridge >/dev/null 2>&1
+		/snap/bin/lxc network create rframe-bridge
+	fi
+
+	if [ "$(/snap/bin/lxc storage list | grep -c "rframe-pool")" -eq 0 ]; then
+		info "Setting up RFrame storage ..."
+		/snap/bin/lxc storage delete rframe-pool >/dev/null 2>&1
+		/snap/bin/lxc storage create rframe-pool dir source="$rframe_dir"
+	fi
+
+	if [ "$(/snap/bin/lxc profile list | grep -c "rframe")" -eq 0 ]; then
+		info "Setting up RFrame profile ..."
+		/snap/bin/lxc profile create rframe
+
+		/snap/bin/lxc profile edit rframe <config/profile.cfg
+	fi
+
+}
+
+function remove_container() {
+	info_inline "Removing RFrame Container ..."
+	/snap/bin/lxc delete --force "rframe-$project_name" >/dev/null | err
+	suc "Removing RFrame Container [\\u2713]"
+}
+
+function stop_container() {
+	info_inline "Stopping RFrame Container ..."
+	/snap/bin/lxc stop -f "rframe-$project_name" >/dev/null | err
+	suc "Stopping RFrame Container [\\u2713]"
+}
+
+function start_container() {
+
+	info_inline "Preparing RFrame Container ..."
+
+	info_inline "Passtrough USB Devices ..."
+
+	num_configured=$(/snap/bin/lxc config device show "rframe-$project_name" | grep -cP "usb\d+:")
+
+	for ((i = 0; i < num_configured; i++)); do
+		/snap/bin/lxc config device remove "rframe-$project_name" "usb${i}" >/dev/null | err
+	done
+
+	readarray -t lsusb <<< "$(echo -e "$(lsusb | sed -E "s/: ID .{4}:.{4}//g")" | cat)"
+	available_usb_devices=""
+
+	dialog='dialog --stdout --keep-tite --backtitle RFrame --checklist "Choose USB devices to passthrough to container:" 0 0 0'
+
+	export DIALOGRC="$(pwd)/config/.dialogrc"
+
+	for (( i=0; i<${#lsusb[@]}; i++ )); do
+		available_usb_devices+="$i \"$(echo -e "${lsusb[$i]}" | sed -E "s/: ID .{4}:.{4}//g")\" off "
+	done
+
+	eval chosen_usb_devices="\$(${dialog} ${available_usb_devices})"
+	selected_lsusb_entries=""
+
+	for i in ${chosen_usb_devices[@]}; do
+		selected_lsusb_entries="$(echo "$selected_lsusb_entries" && echo "${lsusb[$i]}")"
+	done
+
+	bd="$(echo "$selected_lsusb_entries" | grep -oP "(Bus \d{3})|(Device \d{3})" | grep -oP "\d{3}")"
+	c=0
+
+	set -e
+
+	num_selected=$(($(echo "$bd" | wc -l) / 2))
+
+	for ((i = 0; i < num_selected; i++)); do
+
+		bus=$(echo "$bd" | head -n $((c + 1)) | tail -1)
+		dev=$(echo "$bd" | head -n $((c + 2)) | tail -1)
+
+		lsusb_entry="$(lsusb | grep "Bus ${bus} Device ${dev}")"
+		vid=$(echo "$lsusb_entry" | awk '{print $6}' | grep -oP "^[^:]*")
+		pid=$(echo "$lsusb_entry" | awk '{print $6}' | grep -oP ":.*" | sed "s/://g")
+
+		if [[ $bus && $dev ]]; then
+
+			/snap/bin/lxc config device add "rframe-$project_name" "usb${i}" usb vendorid="${vid}" productid="${pid}" >/dev/null | err
+
+		else
+			info "no usb devices selected"
+		fi
+
+		c=$((c + 2))
+	done
+
+	suc "Passtrough USB Devices [\\u2713]"
+
+	info_inline "Starting RFrame Container ..."
+	/snap/bin/lxc start "rframe-$project_name" >/dev/null | err
+	if [[ "$(/snap/bin/lxc list | grep "rframe-$project_name" | grep -c RUNNING)" -eq 0 ]]; then
+		exit 1
+	fi
+	suc "Starting RFrame Container [\\u2713]"
+
+	set +e
+
+	cip=$(/snap/bin/lxc list | grep "rframe-$project_name" | grep -oP "\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}")
+	d="..."
+
+	while true; do
+
+		info_inline "waiting for network connection $d"
+		cip=$(/snap/bin/lxc list | grep "rframe-$project_name" | grep -oP "\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}")
+
+		if [[ $(ping -c 1 -W 1 "$cip" 2>&1 | grep -c ttl) -eq 1 ]]; then
+			sleep 1
+			suc "waiting for network connection [\\u2713]"
+			break
+		fi
+
+		d=$d"."
+		sleep 1
+	done
+
+	d="..."
+
+	while true; do
+
+		info_inline "waiting for ssh connection $d"
+		cip=$(/snap/bin/lxc list | grep "rframe-$project_name" | grep -oP "\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}")
+
+		if [[ $( (sshpass -p rframe ssh -oConnectTimeout=1 -oStrictHostKeyChecking=no -oUserKnownHostsFile=/dev/null nobody@"$cip") 2>&1 | grep "timed out") == "timed out" ]]; then
+			d=$d"."
+			sleep 1
+			continue
+		fi
+		sleep 3
+		suc "waiting for ssh connection [\\u2713]"
+		break
+	done
+
+	info "starting vnc server ..."
+	cip=$(/snap/bin/lxc list | grep "rframe-$project_name" | grep -oP "\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}")
+	ssh -oStrictHostKeyChecking=no -oUserKnownHostsFile=/dev/null -X root@"$cip" vncserver :0 >/dev/null 2>&1
+	suc "starting vnc server [\\u2713]"
+
+	info "The container $project_name is online on $cip and listens for ssh on port 22 and vnc on port 5900"
+	info "You can use \"rframe attach $project_name\" to connect to your container."
+}
+
+function create_container() {
+	info_inline "Initialize RFrame Container ..."
+
+	set -e
+
+	/snap/bin/lxc launch ubuntu:20.04 "rframe-$project_name" -p rframe >/dev/null | err
+	suc "Initialize RFrame Container [\\u2713]"
+
+	info "Setup RFrame Container ... (this might take a while)"
+
+	/snap/bin/lxc config device add "rframe-$project_name" config disk source="$(pwd)/config" path="/config" >/dev/null | err
+	/snap/bin/lxc config device add "rframe-$project_name" shared disk source="$(pwd)/shared" path="/shared" >/dev/null | err
+	/snap/bin/lxc config device set "rframe-$project_name" config readonly="true" >/dev/null | err
+
+	/snap/bin/lxc restart "rframe-$project_name" || (err "failed to restart container" && exit 1)
+
+	(/snap/bin/lxc exec "rframe-$project_name" -- /config/container_setup.sh) || (err "failed to create container" && exit 1)
+
+	echo && suc "Creating RFrame Container [\\u2713]"
+
+	stop_container
+}
+
+function attach_container() {
+
+	if [[ "$(/snap/bin/lxc list | grep "rframe-$project_name" | grep -c RUNNING)" -eq 0 ]]; then
+		start_container
+	fi
+
+	cip=$(/snap/bin/lxc list | grep "rframe-$project_name" | grep -oP "\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}")
+
+	if [[ "$1" == "cli" ]]; then
+		ssh -oStrictHostKeyChecking=no -oUserKnownHostsFile=/dev/null -X "root@$cip"
+	elif [[ "$1" == "gui" ]]; then
+		ssh -oStrictHostKeyChecking=no -oUserKnownHostsFile=/dev/null -X "root@$cip" -- xtigervncviewer -SecurityTypes VncAuth -passwd /root/.vnc/passwd :0 >/dev/null 2>&1 
+	fi
+}
+
+function list_containers() {
+
+	if [[ "$1" == "running" ]]; then
+		/snap/bin/lxc list | head -3 && /snap/bin/lxc list | grep -A 1 -P "(rframe-)" | grep -A 1 -i running
+	elif [[ "$1" == "all" ]]; then
+		/snap/bin/lxc list | head -3 && /snap/bin/lxc list | grep -A 1 -P "(rframe-)"
+	fi
+}
+
+function export_container() {
+
+	if [[ "$(/snap/bin/lxc list | grep "rframe-$project_name" | grep -c RUNNING)" -eq 1 ]]; then
+		echo -n "The container needs to be stopped. Do you want to stop it now? (yes,no): " && read -r stopit
+		if [[ "$stopit" == "yes" ]]; then
+			stop_container
+		else
+			info "Aborting"
+			exit 0
+		fi
+	fi
+
+	target_path="$(dirname "$1")/$(basename "$1" ".tar.gz").tar.gz"
+
+	echo "The container \"$project_name\" will be exported to:"
+	echo "$target_path"
+	echo -n "Do you want to continue (if that file already exists, it will be overwritten)? (yes,no): " && read -r overwrite
+
+	if [[ "$overwrite" == "yes" ]]; then
+		info "Exporting RFrame Container ... (this might take a while)"
+		rin="$RANDOM"
+		target_path="$(dirname "$target_path")/$(basename "$target_path" ".tar.gz")"
+		(/snap/bin/lxc publish "rframe-$project_name" --alias "rframe-export-$rin") || (err "failed to publish image" && exit 1)
+		(/snap/bin/lxc image \export "rframe-export-$rin" "$target_path") || (err "failed to export image" && exit 1)
+		(/snap/bin/lxc image delete "rframe-export-$rin") || (err "failed to delete image" && exit 1)
+		echo && suc "Exporting RFrame Container [\\u2713]"
+	else
+		info "Aborting"
+		exit 0
+	fi
+}
+
+function import_container() {
+
+	target_path="$(dirname "$1")/$(basename "$1" ".tar.gz").tar.gz"
+
+	echo "The new container \"$project_name\" will be imported from:"
+	echo "$target_path"
+	echo -n "Do you want to continue? (yes,no): " && read -r contin
+
+	if [[ "$contin" == "yes" ]]; then
+
+		if [[ "$(/snap/bin/lxc list | grep -c "rframe-$project_name")" -eq 1 ]]; then
+
+			echo "The container will get replaced by the container that gets imported."
+			echo -n "Do you really want to replace it? (yes,no): " && read -r replaceit
+			if [[ "$replaceit" == "yes" ]]; then
+				remove_container
+			else
+				info "Aborting"
+				exit 0
+			fi
+		fi
+
+		info "Importing RFrame Container ... (this might take a while)"
+		rin="$RANDOM"
+
+		(/snap/bin/lxc image import "$target_path" --alias "rframe-import-$rin") || (err "failed to import image" && exit 1)
+		(/snap/bin/lxc launch "rframe-import-$rin" "rframe-$project_name" -p "rframe") || (err "failed to create container" && exit 1)
+		stop_container
+		(/snap/bin/lxc image delete "rframe-import-$rin") || (err "failed to delete image" && exit 1)
+
+		(/snap/bin/lxc config device add "rframe-$project_name" config disk source="$(pwd)/config" path="/config") || (err "failed to bind config dir" && exit 1)
+		(/snap/bin/lxc config device add "rframe-$project_name" shared disk source="$(pwd)/shared" path="/shared") || (err "failed to bind shared dir" && exit 1)
+		(/snap/bin/lxc config device set "rframe-$project_name" config readonly="true") || (err "failed to setup config dir" && exit 1)
+
+		echo && suc "Importing RFrame Container [\\u2713]"
+	else
+		info "Aborting"
+		exit 0
+	fi
+}
+
+function usage() {
+	echo -e "usage:"
+	echo
+	echo -e "rframe COMMAND [OPTIONS] [NAME] [TARGET]"
+	echo -e "------------------------------------------------------------------"
+	echo -e "command          available options          description"
+	echo -e "------------------------------------------------------------------"
+	echo -e "list                                        lists containers"
+	echo -e "                 [--all] (default)          lists all containers"
+	echo -e "                 [--running]                lists only running containers"
+	echo -e "create                                      creates a container specified by NAME"
+	echo -e "{[}re]start                                 [re]starts a container specified by NAME"
+	echo -e "stop                                        stops a container specified by NAME"
+	echo -e "attach                                      attach a container specified by NAME"
+	echo -e "                 [--cli] (default)          use ssh interface"
+	echo -e "                 [--gui]                    use vnc interface"
+	echo -e "remove                                      removes a container specified by NAME"
+	echo -e "import                                      imports a container specified by NAME to FILE"
+	echo -e "export                                      exports a container specified by NAME to FILE"
+}
+
+##################
+##################
+##################
+
+command=$1
+shift
+
+if [ "${command}" == "-h" ] || [ "${command}" == "--help" ] || [ "${command}" == "--usage" ] || [ "${command}" == "" ]; then
+	usage
+	exit
+fi
+
+config
+
+case "$command" in
+
+create)
+
+	project_name="$1"
+
+	if [ ${#project_name} -eq 1 ]; then
+		err "project name can not be empty"
+		exit 1
+	fi
+
+	create_container
+
+	;;
+
+recreate)
+
+	project_name="$1"
+
+	if [ ${#project_name} -eq 1 ]; then
+		err "project name can not be empty"
+		info "EXITING"
+		exit
+	fi
+
+	stop_container
+	remove_container
+	create_container
+
+	;;
+
+attach)
+
+	attach_mode="cli"
+
+	arguments=$(getopt -o cg --long cli,gui -- "$@")
+	eval set -- "$arguments"
+
+	while true; do
+		case "$1" in
+		-c | --cli)
+			attach_mode="cli"
+			shift 1
+			;;
+		-g | --gui)
+			attach_mode="gui"
+			shift 1
+			;;
+		--)
+			shift
+			break
+			;;
+		*)
+			err "Parameter Error"
+			info "EXITING"
+			exit 1
+			;;
+		esac
+	done
+
+	project_name="$1"
+
+	if [ ${#project_name} -eq 1 ]; then
+		err "project name can not be empty"
+		exit 1
+	fi
+
+	attach_container "$attach_mode"
+
+	;;
+
+list)
+
+	list_mode="all"
+
+	arguments=$(getopt -o cg --long running,all -- "$@")
+	eval set -- "$arguments"
+
+	while true; do
+		case "$1" in
+		-r | --running)
+			list_mode="running"
+			shift 1
+			;;
+		-a | --all)
+			list_mode="all"
+			shift 1
+			;;
+		--)
+			shift
+			break
+			;;
+		*)
+			err "Parameter Error"
+			info "EXITING"
+			exit 1
+			;;
+		esac
+	done
+
+	list_containers "$list_mode"
+
+	;;
+
+stop)
+
+	project_name="$1"
+
+	if [ ${#project_name} -eq 1 ]; then
+		err "project name can not be empty"
+		exit 1
+	fi
+
+	stop_container
+
+	;;
+
+start)
+
+	project_name="$1"
+
+	if [ ${#project_name} -eq 1 ]; then
+		err "project name can not be empty"
+		exit 1
+	fi
+
+	start_container
+
+	;;
+
+restart)
+
+	project_name="$1"
+
+	if [ ${#project_name} -eq 1 ]; then
+		err "project name can not be empty"
+		exit 1
+	fi
+
+	stop_container
+	start_container
+
+	;;
+
+remove)
+
+	project_name="$1"
+
+	if [ ${#project_name} -eq 1 ]; then
+		err "project name can not be empty"
+		exit 1
+	fi
+
+	remove_container
+
+	;;
+
+export)
+
+	project_name="$1"
+	target="$2"
+
+	if [ ${#project_name} -eq 1 ]; then
+		err "project name can not be empty"
+		exit 1
+	fi
+
+	if [ ${#target} -eq 1 ]; then
+		err "no target file specified"
+		exit 1
+	fi
+
+	export_container "$target"
+
+	;;
+
+import)
+
+	project_name="$1"
+	target="$2"
+
+	if [ ${#project_name} -eq 1 ]; then
+		err "project name can not be empty"
+		exit 1
+	fi
+
+	if [ ${#target} -eq 1 ]; then
+		err "no target file specified"
+		exit 1
+	fi
+
+	import_container "$target"
+
+	;;
+
+esac

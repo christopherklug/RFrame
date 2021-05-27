@@ -1,0 +1,142 @@
+#!/bin/bash
+
+function info() {
+	LOG_INFO='\033[1;33m'
+	if [[ $(echo -n "$1" | wc -m) -gt 0 ]]; then
+		echo -e "${LOG_INFO}[[ $1 ]]\e[0m  "
+	fi
+}
+
+required_pkgs_generic="snapd usbutils ssh sshpass opt dialog tigervnc-viewer"
+required_pkgs_debian="snapd usbutils ssh sshpass opt dialog tigervnc-viewer"
+required_pkgs_raspberry="snapd usbutils ssh sshpass opt dialog tigervnc-viewer"
+
+if [ "$(uname -a | grep -ic "Debian")" -eq 1 ]; then
+	if [ "$(command -v "apt-get" | grep -ic "apt-get")" -eq 1 ]; then
+
+		##########
+		### DEBIAN
+		##############
+
+		PKGM_LIST_INSTALLED="apt list --installed"
+		PKGM_UPDATE="sudo apt-get update"
+		PKGM_INSTALL="sudo apt-get install -y"
+
+		eval "$PKGM_UPDATE"
+
+		echo "$required_pkgs_debian" | sed "s/ /\n/g" | while read -r pkg; do
+			info "installing ${pkg} ..."
+			code="$( (${PKGM_LIST_INSTALLED} 2>/dev/null | grep -oP "^[^/]+" | grep -oPc "^${pkg}$") || (echo "installing" && ${PKGM_INSTALL} "${pkg}"))"
+			( (echo "$code" | grep -oc "installing" >/dev/null 2>&1) && info "${pkg} installed") || info "${pkg} already installed"
+		done
+
+		sudo chown 1000000 ./shared
+		sudo chmod 775 ./shared
+
+		sudo snap install core
+		sudo snap install lxd --channel=4.0/stable
+		sudo usermod -aG lxd "${USER}"
+
+		info "The current user has been added to a new group (lxd). Please logout and login again, or reboot the machine."
+		exit
+	fi
+fi
+
+if [ "$(uname -a | grep -ic "Ubuntu")" -eq 1 ]; then
+	if [ "$(command -v "apt-get" | grep -ic "apt-get")" -eq 1 ]; then
+
+		##########
+		### UBUNTU
+		##############
+
+		PKGM_LIST_INSTALLED="apt list --installed"
+		PKGM_UPDATE="sudo apt-get update"
+		PKGM_INSTALL="sudo apt-get install -y"
+
+		eval "$PKGM_UPDATE"
+
+		echo "$required_pkgs_debian" | sed "s/ /\n/g" | while read -r pkg; do
+			info "installing ${pkg} ..."
+			code="$( (${PKGM_LIST_INSTALLED} 2>/dev/null | grep -oP "^[^/]+" | grep -oPc "^${pkg}$") || (echo "installing" && ${PKGM_INSTALL} "${pkg}"))"
+			( (echo "$code" | grep -oc "installing" >/dev/null 2>&1) && info "${pkg} installed") || info "${pkg} already installed"
+		done
+
+		sudo chown 1000000 ./shared
+		sudo chmod 775 ./shared
+
+		sudo snap install core
+		sudo snap install lxd --channel=4.0/stable
+		sudo usermod -aG lxd "${USER}"
+
+		info "The current user has been added to a new group (lxd). Please logout and login again, or reboot the machine."
+		exit
+	fi
+fi
+
+if [ "$(uname -a | grep -ic "Raspberry")" -eq 1 ]; then
+	if [ "$(command -v "apt-get" | grep -ic "apt-get")" -eq 1 ]; then
+
+		##########
+		### RASPBERRY
+		##############
+
+		PKGM_LIST_INSTALLED="apt-get list --installed"
+		PKGM_UPDATE="sudo apt-get-get update"
+		PKGM_INSTALL="sudo apt-get-get install -y"
+
+		eval "$PKGM_UPDATE"
+
+		echo "$required_pkgs_raspberry" | sed "s/ /\n/g" | while read -r pkg; do
+			info "installing ${pkg} ..."
+			code="$( (${PKGM_LIST_INSTALLED} 2>/dev/null | grep -oP "^[^/]+" | grep -oPc "^${pkg}$") || (echo "installing" && ${PKGM_INSTALL} "${pkg}"))"
+			( (echo "$code" | grep -oc "installing" >/dev/null 2>&1) && info "${pkg} installed") || info "${pkg} already installed"
+		done
+
+		sudo chown 1000000 ./shared
+		sudo chmod 775 ./shared
+
+		sudo snap install core
+		sudo snap install lxd --channel=4.0/stable
+		sudo usermod -aG lxd "${USER}"
+
+		info "The current user has been added to a new group (lxd). Please logout and login again, or reboot the machine."
+		exit
+	fi
+fi
+
+info "No supported distribution found."
+echo -n "Do you want to try the generic setup (this requires apt as packet manager)? (yes,no): " && read -r trysetup
+
+if [[ "$trysetup" == "yes" ]]; then
+	if [ "$(command -v "apt-get" | grep -ic "apt-get")" -eq 1 ]; then
+
+		##########
+		### GENERIC
+		##############
+
+		PKGM_LIST_INSTALLED="apt-get list --installed"
+		PKGM_UPDATE="sudo apt-get-get update"
+		PKGM_INSTALL="sudo apt-get-get install -y"
+
+		eval "$PKGM_UPDATE"
+
+		echo "$required_pkgs_generic" | sed "s/ /\n/g" | while read -r pkg; do
+			info "installing ${pkg} ..."
+			code="$( (${PKGM_LIST_INSTALLED} 2>/dev/null | grep -oP "^[^/]+" | grep -oPc "^${pkg}$") || (echo "installing" && ${PKGM_INSTALL} "${pkg}"))"
+			( (echo "$code" | grep -oc "installing" >/dev/null 2>&1) && info "${pkg} installed") || info "${pkg} already installed"
+		done
+
+		sudo chown 1000000 ./shared
+		sudo chmod 775 ./shared
+
+		sudo snap install core
+		sudo snap install lxd --channel=4.0/stable
+		sudo usermod -aG lxd "${USER}"
+
+		info "The current user has been added to a new group (lxd). Please logout and login again, or reboot the machine."
+		exit
+	fi
+else
+	info "Aborting"
+	exit 0
+fi
